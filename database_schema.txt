@@ -1,0 +1,506 @@
+CREATE TABLE users (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    username VARCHAR(254) NOT NULL,
+    passhash char(40) NOT NULL, 
+    email VARCHAR(254),
+    email_confirmed BOOLEAN NOT NULL DEFAULT false,
+    notifications BOOLEAN NOT NULL DEFAULT false,
+    name VARCHAR(40),
+
+    PRIMARY KEY (id),
+    UNIQUE(username)
+);
+
+
+
+CREATE TABLE groups (
+    id BIGINT NOT NULL  AUTO_INCREMENT,
+    name VARCHAR(63) NOT NULL,
+    enrollment_code VARCHAR(15),
+    is_public BOOLEAN NOT NULL DEFAULT false,
+    looking_for_subgroups BOOLEAN NOT NULL DEFAULT false,
+    individual BOOLEAN NOT NULL DEFAULT false,
+
+    PRIMARY KEY (id)
+);
+
+/* If an admin of GroupA is a member of GroupB and wants to add GroupA
+    To GroupB's related group list, they can create a link in this table
+    which will allow members of groupB to get access to the id, name and enrollment code
+    of groupA, allowing them to easily join groupA from GroupB's related groups page
+*/
+CREATE TABLE related_groups (
+    id_group_a BIGINT NOT NULL,
+    id_group_b BIGINT NOT NULL,
+
+    PRIMARY KEY (id_group_a, id_group_b),
+    FOREIGN KEY (id_group_a) REFERENCES groups (id) ON DELETE CASCADE,
+    FOREIGN KEY (id_group_b) REFERENCES groups (id) ON DELETE CASCADE
+);
+
+CREATE TABLE entries (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    title VARCHAR(80),
+    start DATETIME,
+    end DATETIME,
+    file_count INT,
+    priority INT,
+    recurrence VARCHAR(40),
+    description VARCHAR(1024),
+
+    PRIMARY KEY (id)
+);
+
+CREATE TABLE files (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    user_id BIGINT NOT NULL,
+    title VARCHAR(80),
+    path VARCHAR(260) NOT NULL,
+    type VARCHAR(127),
+
+    PRIMARY KEY (id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+
+CREATE TABLE user_group_join (
+    user_id BIGINT NOT NULL,
+    group_id BIGINT NOT NULL,
+    admin BOOLEAN NOT NULL DEFAULT false,
+    looking_for_subgroup BOOLEAN NOT NULL DEFAULT FALSE,
+    admin_email VARCHAR(254),
+
+    PRIMARY KEY (user_id, group_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE
+);
+
+CREATE TABLE group_requests (
+    user_id BIGINT NOT NULL,
+    group_id BIGINT NOT NULL,
+
+    PRIMARY KEY (user_id, group_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE
+);
+
+CREATE TABLE group_entry_join (
+    group_id BIGINT NOT NULL,
+    entry_id BIGINT NOT NULL,
+
+    PRIMARY KEY (group_id, entry_id),
+    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
+);
+
+CREATE TABLE entry_file_join (
+    entry_id BIGINT NOT NULL,
+    file_id BIGINT NOT NULL,
+
+    PRIMARY KEY (entry_id, file_id),
+    FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE,
+    FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
+);
+
+CREATE TABLE group_subgroup_join (
+    parent_id BIGINT NOT NULL,
+    child_id BIGINT NOT NULL,
+
+    PRIMARY KEY (parent_id, child_id),
+    FOREIGN KEY (parent_id) REFERENCES groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (child_id) REFERENCES groups(id) ON DELETE CASCADE
+);
+
+
+CREATE TABLE reports (
+    user_id BIGINT NOT NULL,
+    group_id BIGINT NOT NULL,
+    details VARCHAR(500),
+
+    PRIMARY KEY (user_id, group_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (group_id) REFERENCES groups(id) ON DELETE CASCADE
+);
+
+/* Delimiter must be temporarily changed to work around some AWS annoyances */
+DELIMITER $$
+CREATE TRIGGER make_individual_group AFTER INSERT ON users
+FOR EACH ROW BEGIN
+  INSERT INTO groups (name, individual) VALUES ('(individual group)', true);
+  INSERT INTO user_group_join (user_id, group_id, admin) VALUES (NEW.id, LAST_INSERT_ID(), true);
+END;
+$$
+DELIMITER ;
+
+
+
+
+
+
+
+/* BELOW ARE THE SQL PROCEDURES ON THE MySQL SERVER. THESE MAKE LAMBDA'S JOB EASIER */
+DELIMITER $$
+
+
+CREATE PROCEDURE add_group_to_related (un VARCHAR(254), ph CHAR(40), gidA BIGINT, gidB BIGINT)
+BEGIN
+    DECLARE admin_of_a INT DEFAULT 0;
+    DECLARE member_of_b INT DEFAULT 0;
+    SELECT COUNT(*) INTO admin_of_a FROM users, user_group_join
+        WHERE users.username = un AND
+            users.passhash = ph AND
+            user_group_join.user_id = users.id AND
+            user_group_join.group_id = gidA AND
+            user_group_join.admin = true;
+    IF admin_of_a > 0 THEN
+        SELECT COUNT(*) INTO member_of_b FROM users, user_group_join
+        WHERE users.username = un AND
+            users.passhash = ph AND
+            user_group_join.user_id = users.id AND
+            user_group_join.group_id = gidB;
+        IF member_of_b > 0 THEN
+            INSERT INTO related_groups (id_group_a, id_group_b) VALUES (gidA, gidB);
+        ELSE
+            SELECT NULL;
+        END IF;
+    ELSE
+        SELECT NULL;
+    END IF;
+END;
+$$
+
+
+
+
+
+/* Create a procedure to help with the creation of groups */
+CREATE PROCEDURE create_group (gn VARCHAR(63), un VARCHAR(254), ph CHAR(40))
+BEGIN
+  DECLARE gid BIGINT; 
+  DECLARE uid BIGINT; 
+  SELECT id INTO uid FROM users WHERE username = un AND passhash = ph; 
+  IF uid IS NOT NULL THEN
+    INSERT INTO groups (name) VALUES (gn);
+    SET gid = LAST_INSERT_ID();
+    INSERT INTO user_group_join (user_id, group_id, admin) VALUES (uid, gid, true);
+    SELECT gid;
+  ELSE 
+    SELECT NULL;
+  END IF;
+END;
+$$
+
+
+CREATE PROCEDURE join_group_by_enrollment_code (un VARCHAR(254), ph CHAR(40), enrollment_c VARCHAR(15))
+BEGIN
+    DECLARE gid BIGINT DEFAULT -1;
+    DECLARE uid BIGINT DEFAULT -1;
+    SELECT users.id INTO uid FROM users
+    WHERE users.username = un AND
+        users.passhash = ph;
+    IF uid < 0 THEN
+        SELECT NULL;
+    ELSE
+        SELECT groups.id INTO gid FROM groups 
+        WHERE groups.enrollment_code = enrollment_c;
+        IF gid < 0 THEN
+            SELECT NULL;
+        ELSE
+            INSERT INTO user_group_join (user_id, group_id, looking_for_subgroup) VALUES (uid, gid, true); 
+            SELECT * FROM groups WHERE groups.id = gid;
+        END IF;
+    END IF;
+END;
+$$
+
+
+
+/* Change password for a user. Requires username, previous passhash and new passhash */
+CREATE PROCEDURE change_password(un VARCHAR(254), passhash_old CHAR(40), passhash_new CHAR(40) )
+BEGIN
+  DECLARE uid BIGINT;
+  SELECT id INTO uid FROM users WHERE username = un AND passhash = passhash_old;
+  IF uid IS NOT NULL THEN
+    UPDATE users SET passhash = passhash_new WHERE id = uid AND passhash = passhash_old;
+    SELECT true AS success;
+  ELSE
+    SELECT false AS success;
+  END IF;
+END;
+$$
+
+   
+CREATE PROCEDURE create_entry(  _username VARCHAR(254), 
+                                _passhash VARCHAR(40), 
+                                _group_id BIGINT, 
+                                _title VARCHAR(80), 
+                                _start DATETIME, 
+                                _end DATETIME, 
+                                _recurrence VARCHAR(40), 
+                                _priority INT, 
+                                _description VARCHAR(1024) )
+BEGIN
+    DECLARE new_entry_id BIGINT;
+    DECLARE c INT;
+   
+    SELECT COUNT(*) INTO c FROM users, user_group_join 
+    WHERE
+        users.username = _username AND 
+        users.passhash = _passhash AND 
+        user_group_join.user_id = users.id AND 
+        user_group_join.group_id = _group_id AND 
+        user_group_join.admin = true;
+     /* Ensure the user is an admin of the group they wish to add an event to */
+    IF c > 0 THEN
+        INSERT INTO entries (title, start, end, priority, recurrence, description) VALUES 
+            (_title, _start, _end, _priority, _recurrence, _description);
+        SELECT LAST_INSERT_ID() INTO new_entry_id;
+        INSERT INTO group_entry_join (group_id, entry_id) VALUES (_group_id, new_entry_id);
+        SELECT new_entry_id AS entry_id;
+    ELSE
+        SELECT -1 AS entry_id;
+    END IF;
+END;
+$$
+
+
+CREATE PROCEDURE update_entry(  _username VARCHAR(254), 
+                                _passhash VARCHAR(40),
+                                _entry_id BIGINT,
+                                _title VARCHAR(80),
+                                _start DATETIME, 
+                                _end DATETIME, 
+                                _recurrence VARCHAR(40), 
+                                _priority INT, 
+                                _description VARCHAR(1024) )
+BEGIN
+    DECLARE c INT;
+    SELECT COUNT(*) INTO c FROM users, entries, groups, user_group_join, group_entry_join
+    WHERE
+        users.username = _username AND
+        users.passhash = _passhash AND
+        entries.id = _entry_id AND
+        group_entry_join.entry_id = _entry_id AND
+        groups.id = group_entry_join.group_id AND
+        user_group_join.user_id = users.id AND
+        user_group_join.group_id = groups.id AND
+        user_group_join.admin = true;
+    
+    IF c = 1 THEN
+        UPDATE entries
+            SET title = _title, 
+                start = _start, 
+                end = _end, 
+                recurrence = _recurrence, 
+                priority = _priority, 
+                description = _description
+            WHERE id = _entry_id;
+        SELECT true AS success;
+    ELSE
+        SELECT false AS success;
+    END IF;
+END;
+$$
+
+
+CREATE PROCEDURE delete_entry(_username VARCHAR(254), _passhash VARCHAR(40), _entry_id BIGINT)
+BEGIN
+    DECLARE is_admin INT;
+    
+    SELECT COUNT(*) INTO is_admin FROM users, user_group_join, group_entry_join
+    WHERE
+        users.username = _username AND
+        users.passhash = _passhash AND
+        user_group_join.user_id = users.id AND
+        user_group_join.admin = true AND
+        user_group_join.group_id = group_entry_join.group_id AND
+        group_entry_join.entry_id = _entry_id;
+    IF is_admin = 1 THEN
+        DELETE FROM entries WHERE entries.id = _entry_id;
+    ELSE
+        SELECT NULL;
+    END IF;
+END;
+$$
+
+
+
+
+DELIMITER ;
+
+
+CREATE PROCEDURE handle_request_decision ( IN run VARCHAR(254), 
+                                           IN rph CHAR(40)),
+                                           IN aun VARCHAR(254),
+                                           IN aph CHAR(40),
+                                           IN gn VARCHAR(63),
+                                           IN d BOOLEAN,
+                                           OUT success BOOLEAN)
+BEGIN
+    DECLARE gid BIGINT;
+    DECLARE uid BIGINT;
+    DECLARE request_uid BIGINT;
+    DECLARE admin_uid BIGINT;
+    SELECT id INTO gid FROM groups WHERE name = gn;
+    SELECT id INTO uid FROM users WHERE passhash = rph AND username = run;
+    
+    /* Verify the existence of the user and whether or not he is int the group_request */
+    IF uid IS NOT NULL AND gid IS NOT NULL THEN
+        SELECT id INTO request_uid FROM group_requests WHERE user_id = request_id AND group_id = gid;
+        /* Verify that the admin is a user and an admin of the group to accept/decline the request */
+        SELECT id INTO uid FROM users WHERE passhash = aph AND username = aun;
+        
+        IF uid IS NOT NULL AND request_id IS NOT NULL THEN
+            SELECT id INTO admin_uid FROM user_group_join WHERE user_id = uid AND group_id = gid;
+            
+            /* Make the decision */
+            IF admin_uid IS NOT NULL THEN
+                /* Add the member to the group */
+                IF d THEN
+                    INSERT INTO user_group_join(user_id, group_id, admin) VALUES (request_uid, gid,false);
+                    DELETE FROM group_requests WHERE user_id = request_uid AND group_id = gid;
+                    SELECT true AS success;
+                /* Delete the group_request, their entry was denied */
+                ELSE
+                    DELETE FROM group_requests WHERE user_id = request_id AND group_id = gid;
+                    SELECT true AS success;
+                END IF;
+            ELSE
+                SELECT false AS success;
+            END IF;
+        ELSE
+            SELECT false AS success;
+        END IF;
+    ELSE
+        SELECT false AS success;
+    END IF;
+END;
+$$
+DELIMITER;
+
+CREATE PROCEDURE delete_group(gid BIGINT, aun VARCHAR(254), aph CHAR(40))
+BEGIN   
+    DECLARE is_admin BOOLEAN;
+    DECLARE uid BIGINT;
+    SELECT users.id INTO uid FROM users WHERE users.username = aun AND users.passhash = aph;
+
+
+    IF uid is NOT NULL AND gid is NOT NULL THEN
+        SELECT user_group_join.admin INTO is_admin FROM user_group_join WHERE user_group_join.user_group_join = uid;
+        IF is_admin THEN
+            DELETE FROM groups WHERE groups.id = gid;
+            SELECT true AS success;
+        ELSE 
+            SELECT false AS success;
+        END iF;
+    ELSE 
+        SELECT false as success;
+    END IF;
+END;
+$$
+DELIMITER;
+
+
+
+
+INSERT INTO users (id, username, passhash, email, email_confirmed, notifications, name) VALUES (1, 'jeff', 'not_sha1', 'jeffreytcash@gmail.com', 'false', 'true', 'Jeff');
+INSERT INTO users (id, username, passhash, email, email_confirmed, notifications, name) VALUES (2, 'jeff2', 'not_sha1_either', 'jeffreytcash@gmail.com', 'false', 'true', 'Jeffy');
+                                                                                                                                                                                                        
+INSERT INTO groups (id, name) VALUES (1, 'gary group');
+INSERT INTO user_group_join (user_id, group_id) VALUES (1,1);
+
+INSERT INTO entries (id, title, start, end) VALUES (1, 'Gary Lecture', '2018-05-15 14:00', '2018-05-15 15:20');
+INSERT INTO group_entry_join VALUES (1, 1);
+
+                               
+
+
+SELECT groups.id, groups.name, entries.title, entries.start, entries.end FROM users, groups, user_group_join WHERE        username = 'jeff' AND passhash = 'not_sha1' AND user_id = users.id AND groups.id = group_id;
+
+
+
+CREATE PROCEDURE get_group_member_entries (un VARCHAR(254), ph CHAR(40), gid BIGINT)
+BEGIN
+    DECLARE is_member INT;
+    SELECT COUNT(users.*) INTO is_member FROM users, user_group_join
+    WHERE users.username = un AND
+        users.passhash = ph AND
+        user_group_join.user_id = users.id AND
+        user_group_join.group_id = gid;
+
+    IF is_member = 1 THEN
+        SELECT entries.id, entries.start, entries.end
+        FROM entries, user_group_join, group_entry_join
+        WHERE 
+            user_group_join.group_id = gid AND
+            user_group_join.looking_for_subgroup = true AND
+            group_entry_join.group_id = gid AND
+            group_entry_join.entry_id = entries.id;
+    ELSE
+        SELECT NULL;
+    END IF;
+END;
+$$
+
+
+
+CREATE PROCEDURE get_group_member_entries (un VARCHAR(254), ph CHAR(40), gid BIGINT)
+BEGIN
+    DECLARE member_of INT DEFAULT 0;
+    SELECT COUNT(*) INTO member_of FROM users, user_group_join
+        WHERE users.username = un AND
+            users.passhash = ph AND
+            user_group_join.user_id = users.id AND
+            user_group_join.group_id = gid;
+
+    IF member_of > 0 THEN
+        SELECT uid, id, start, end FROM uid_to_entry
+        WHERE uid IN (
+            SELECT user_id FROM user_group_join 
+            WHERE user_group_join.group_id = gid
+        );
+    ELSE
+        SELECT NULL;
+    END IF;
+
+END;
+$$
+
+
+/* NEWEST VERSION */
+
+CREATE PROCEDURE get_group_member_entries (un VARCHAR(254), ph CHAR(40), gid BIGINT)
+BEGIN
+    DECLARE member_of INT;
+    SELECT COUNT(*) INTO member_of FROM users, user_group_join
+        WHERE users.username = un AND
+            users.passhash = ph AND
+            user_group_join.user_id = users.id AND
+            user_group_join.group_id = gid;
+
+    IF member_of > 0 THEN
+        
+    ELSE
+
+    END IF;
+END;
+$$
+
+
+
+
+CREATE PROCEDURE reset_password(un VARCHAR(254), new_passhash CHAR(40))
+BEGIN
+    DECLARE c INT;
+
+    SELECT COUNT(*) INTO c FROM users WHERE username = un;
+    IF c = 1 THEN
+        UPDATE users SET passhash = new_passhash WHERE username = un;
+        SELECT true AS success;
+    ELSE
+        SELECT false AS success;
+    END IF;
+END;
+$$
+
+
