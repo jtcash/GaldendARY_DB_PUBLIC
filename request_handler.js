@@ -59,10 +59,12 @@ function handle_test(event, callback, context){
   console.log("context:", context);
   // return handle_statement({statement: "SELECT COUNT(*) AS c FROM users;"}, (err, data) => {
   return handle_statement({statement: "SELECT * FROM entries;"}, (err, data) => {
-    let str = JSON.stringify(data) + '\n<br/>\n<br/>\n';
-    data.forEach((element, index) => {
-      str += index + ':\t' + JSON.stringify(element) +'\n<br/>\n';
-    });
+    // let str = JSON.stringify(data) + '\n<br/>\n<br/>\n';
+    // data.forEach((element, index) => {
+    //   str += index + ':\t' + JSON.stringify(element) +'\n<br/>\n';
+    // });
+    // console.log(str);
+    let str = "There server is up and running\n<br/>\n" + data.length + "entries in the database";
     console.log(str);
     return callback(null, str);
 
@@ -224,7 +226,7 @@ function handle_alter_group(event, callback, context){
   let looking_for_subgroups = get_event_property_optional(event, 'looking_for_subgroups');
 
   if(group_name == null && is_public == null && looking_for_subgroups == null){
-    return callback("handle_alter_group: Will not alter anything");
+    return callback("handle_alter_ggroup: Will not alter anything");
   }
 
   let params = [];
@@ -827,8 +829,8 @@ module.exports = (event, callback, context) => {
     case 'test': case 't':
       return handle_test(event, callback, context);
 
-    case 'statement': case 's': // TODO remove this from public access
-      return handle_statement(event, callback, context);
+    // case 'statement': case 's': // TODO remove this from public access
+    //   return handle_statement(event, callback, context);
     
     case 'verify_login': case "v_l":
       return handle_verify_login(event, callback, context);
