@@ -663,7 +663,7 @@ function handle_dissolve_group(event, callback, context) {
   let ph = get_event_property(event, 'passhash', callback);
 
   let statement = SqlString.format(
-    'CALL delete_group(?, ?, ?);',
+    'CALL dissolve_group(?, ?, ?);',
     [gid, un, ph]
   );
 

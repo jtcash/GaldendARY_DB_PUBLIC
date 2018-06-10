@@ -378,6 +378,7 @@ END;
 $$
 DELIMITER;
 
+/* Replaced with dissolve group as this one was beyond repair
 CREATE PROCEDURE delete_group(gid BIGINT, aun VARCHAR(254), aph CHAR(40))
 BEGIN   
     DECLARE is_admin BOOLEAN;
@@ -397,7 +398,30 @@ BEGIN
         SELECT false as success;
     END IF;
 END;
+$$*/
+
+
+CREATE PROCEDURE dissolve_group(gid BIGINT, un VARCHAR(254), ph CHAR(40))
+BEGIN
+    DECLARE isadmin INT DEFAULT 0;
+    
+
+    SELECT COUNT(*) INTO isadmin FROM users, user_group_join
+    WHERE users.username = un AND 
+        users.passhash = ph AND
+        user_group_join.user_id = users.id AND
+        user_group_join.group_id = gid AND
+        user_group_join.admin = true;
+
+    IF isadmin = 1 THEN
+        DELETE FROM groups WHERE id = gid;
+    ELSE
+        SELECT NULL;
+    END IF;
+
+END;
 $$
+
 DELIMITER;
 
 
