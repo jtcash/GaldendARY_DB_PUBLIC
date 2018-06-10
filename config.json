@@ -1,6 +1,0 @@
-{
-    "dbhost"     : "gary-db-instance.clcwkrhvtddg.us-west-1.rds.amazonaws.com",
-    "dbname" : "galendary",
-    "dbuser"     : "jtcash",
-    "dbpassword" : "AWSgary1"
-}
